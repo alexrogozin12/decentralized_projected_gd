@@ -15,9 +15,15 @@ def _DEVICE():
     return 'cuda:0' if torch.cuda.is_available() else 'cpu:0'
 
 
-def get_graph_generator(n):
-    def generator():
-        return nx.generators.connected_watts_strogatz_graph(n, 4, 0.1)
+def get_graph_generator(n, graph_type='watts_strogatz', **kwargs):
+    if graph_type == 'watts_strogatz':
+        def generator():
+            return nx.generators.connected_watts_strogatz_graph(n, **kwargs)
+    elif graph_type == 'geometric':
+        def generator():
+            return nx.generators.geometric.random_geometric_graph(n, **kwargs)
+    else:
+        raise ValueError('Unknown graph type: "{}"'.format(graph_type))
     return generator
 
 
@@ -74,8 +80,9 @@ def project(Y, gen_graph, R=10., eps=1e-1, N_iter=100, gamma=1e-4,
         return X
 
 
-def projected_gradient(X_starting, A_batches, c_train, regcoef=0.01, 
-                       gamma_outer=5., gamma_inner=1e-4, N_outer=200, N_inner=100, R=10., eps=0.1):
+def projected_gradient(X_starting, A_batches, c_train, regcoef, gen_graph, 
+                       gamma_outer=5., gamma_inner=1e-4, N_outer=200, 
+                       N_inner=100, R=10., eps=0.1):
     
     hist = defaultdict(list)
     X = X_starting.clone().detach().requires_grad_(True)
@@ -84,7 +91,7 @@ def projected_gradient(X_starting, A_batches, c_train, regcoef=0.01,
             X.grad.detach_()
             X.grad.zero_()
         res = decentralized_logistic_regr(X, A_batches)
-        loss = torch.nn.BCELoss(reduction='mean')(res, c_train)
+        loss = torch.nn.BCELoss(reduction='mean')(res, c_train) + regcoef * torch.sum(X**2)
         loss.backward()
         hist['func'].append(loss.item())
 
@@ -93,14 +100,13 @@ def projected_gradient(X_starting, A_batches, c_train, regcoef=0.01,
 
         X.data.add_(-gamma_outer, X.grad.data)
 
-        X.data = project(X, get_graph_generator(X.shape[1]), R, eps, 
-                         N_inner, gamma_inner).data
+        X.data = project(X, gen_graph, R, eps, N_inner, gamma_inner).data
     
     hist['X'] = X.data.clone().detach()
     return hist
 
 
-def acc_projected_gradient(X_starting, A_batches, c_train, regcoef=0.01, momentum=0.99, 
+def acc_projected_gradient(X_starting, A_batches, c_train, gen_graph, regcoef=0.01, momentum=0.99, 
                            gamma_outer=5., gamma_inner=1e-4, N_outer=200, N_inner=100, 
                            R=10., eps=0.1):
     
@@ -113,7 +119,7 @@ def acc_projected_gradient(X_starting, A_batches, c_train, regcoef=0.01, momentu
             X.grad.detach_()
             X.grad.zero_()
         res = decentralized_logistic_regr(X, A_batches)
-        loss = torch.nn.BCELoss(reduction='mean')(res, c_train)
+        loss = torch.nn.BCELoss(reduction='mean')(res, c_train) + regcoef * torch.sum(X**2)
         loss.backward()
         hist['func'].append(loss.item())
 
@@ -122,8 +128,7 @@ def acc_projected_gradient(X_starting, A_batches, c_train, regcoef=0.01, momentu
 
         Y.data = X.data.clone().detach()
         Y.data.add_(-gamma_outer, X.grad.data)
-        Y.data = project(Y, get_graph_generator(X.shape[1]), R, eps, 
-                         N_inner, gamma_inner)
+        Y.data = project(Y, gen_graph, R, eps, N_inner, gamma_inner)
         X.data = Y.data.clone().detach()
         X.data.add_(momentum, (Y - Y_old).data)
         Y_old.data = Y.data.clone().detach()
@@ -132,14 +137,13 @@ def acc_projected_gradient(X_starting, A_batches, c_train, regcoef=0.01, momentu
     return hist
 
 
-def DIGing(X_starting, A_batches, c_train, N_iter=1000, alpha=0.5):
+def DIGing(X_starting, A_batches, c_train, gen_graph, N_iter=1000, alpha=0.5):
     X = X_starting.clone().detach().requires_grad_(True)
     res = decentralized_logistic_regr(X, A_batches)
     loss = torch.nn.BCELoss(reduction='mean')(res, c_train)
     loss.backward()
     Y = X.grad.clone().detach()
     old_grad = X.grad.clone().detach()
-    gen_graph = get_graph_generator(X_starting.shape[1])
     hist = defaultdict(list)
 
     for step in tqdm_notebook(range(N_iter)):
